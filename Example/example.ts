@@ -36,6 +36,12 @@ const startSock = async() => {
 		msgRetryCounterMap,
 		// implement to handle retries
 		getMessage: async key => {
+			if(store) {
+				const msg = await store.loadMessage(key.remoteJid!, key.id!, undefined)
+				return msg?.message || undefined
+			}
+
+			// only if store is present
 			return {
 				conversation: 'hello'
 			}
@@ -113,7 +119,7 @@ const startSock = async() => {
 					for(const msg of upsert.messages) {
 						if(!msg.key.fromMe && doReplies) {
 							console.log('replying to', msg.key.remoteJid)
-							await sock!.sendReadReceipt(msg.key.remoteJid!, msg.key.participant!, [msg.key.id!])
+							await sock!.readMessages([msg.key])
 							await sendMessageWTyping({ text: 'Hello there!' }, msg.key.remoteJid!)
 						}
 					}
@@ -139,6 +145,10 @@ const startSock = async() => {
 
 			if(events['chats.update']) {
 				console.log(events['chats.update'])
+			}
+
+			if(events['chats.delete']) {
+				console.log('chats deleted ', events['chats.delete'])
 			}
 		}
 	)
