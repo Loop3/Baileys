@@ -1,7 +1,8 @@
 import { Boom } from '@hapi/boom'
+import { AxiosRequestConfig } from 'axios'
 import type { Logger } from 'pino'
 import { proto } from '../../WAProto'
-import { BaileysEventEmitter, ChatModification, ChatMutation, Contact, InitialAppStateSyncOptions, LastMessageList, LTHashState, WAPatchCreate, WAPatchName } from '../Types'
+import { BaileysEventEmitter, Chat, ChatModification, ChatMutation, ChatUpdate, Contact, InitialAppStateSyncOptions, LastMessageList, LTHashState, WAPatchCreate, WAPatchName } from '../Types'
 import { BinaryNode, getBinaryNodeChild, getBinaryNodeChildren, isJidGroup, jidNormalizedUser } from '../WABinary'
 import { aesDecrypt, aesEncrypt, hkdf, hmacSign } from './crypto'
 import { toNumber } from './generics'
@@ -273,7 +274,10 @@ export const decodeSyncdPatch = async(
 	return result
 }
 
-export const extractSyncdPatches = async(result: BinaryNode) => {
+export const extractSyncdPatches = async(
+	result: BinaryNode,
+	options: AxiosRequestConfig<any>
+) => {
 	const syncNode = getBinaryNodeChild(result, 'sync')
 	const collectionNodes = getBinaryNodeChildren(syncNode, 'collection')
 
@@ -300,7 +304,7 @@ export const extractSyncdPatches = async(result: BinaryNode) => {
 					const blobRef = proto.ExternalBlobReference.decode(
                         snapshotNode.content! as Buffer
 					)
-					const data = await downloadExternalBlob(blobRef)
+					const data = await downloadExternalBlob(blobRef, options)
 					snapshot = proto.SyncdSnapshot.decode(data)
 				}
 
@@ -328,8 +332,11 @@ export const extractSyncdPatches = async(result: BinaryNode) => {
 }
 
 
-export const downloadExternalBlob = async(blob: proto.IExternalBlobReference) => {
-	const stream = await downloadContentFromMessage(blob, 'md-app-state')
+export const downloadExternalBlob = async(
+	blob: proto.IExternalBlobReference,
+	options: AxiosRequestConfig<any>
+) => {
+	const stream = await downloadContentFromMessage(blob, 'md-app-state', { options })
 	const bufferArray: Buffer[] = []
 	for await (const chunk of stream) {
 		bufferArray.push(chunk)
@@ -338,8 +345,11 @@ export const downloadExternalBlob = async(blob: proto.IExternalBlobReference) =>
 	return Buffer.concat(bufferArray)
 }
 
-export const downloadExternalPatch = async(blob: proto.IExternalBlobReference) => {
-	const buffer = await downloadExternalBlob(blob)
+export const downloadExternalPatch = async(
+	blob: proto.IExternalBlobReference,
+	options: AxiosRequestConfig<any>
+) => {
+	const buffer = await downloadExternalBlob(blob, options)
 	const syncData = proto.SyncdMutations.decode(buffer)
 	return syncData
 }
@@ -399,6 +409,7 @@ export const decodePatches = async(
 	initial: LTHashState,
 	getAppStateSyncKey: FetchAppStateSyncKey,
 	onMutation: (mut: ChatMutation) => void,
+	options: AxiosRequestConfig<any>,
 	minimumVersionNumber?: number,
 	logger?: Logger,
 	validateMacs: boolean = true
@@ -416,7 +427,7 @@ export const decodePatches = async(
 		const { version, keyId, snapshotMac } = syncd
 		if(syncd.externalMutations) {
 			logger?.trace({ name, version }, 'downloading external patch')
-			const ref = await downloadExternalPatch(syncd.externalMutations)
+			const ref = await downloadExternalPatch(syncd.externalMutations, options)
 			logger?.debug({ name, version, mutations: ref.mutations.length }, 'downloaded external patch')
 			syncd.mutations?.push(...ref.mutations)
 		}
@@ -607,7 +618,6 @@ export const processSyncAction = (
 	logger?: Logger,
 ) => {
 	const isInitialSync = !!initialSyncOpts
-	const recvChats = initialSyncOpts?.recvChats
 	const accountSettings = initialSyncOpts?.accountSettings
 
 	const {
@@ -620,13 +630,14 @@ export const processSyncAction = (
 			[
 				{
 					id,
-					mute: action.muteAction?.muted ?
-						toNumber(action.muteAction!.muteEndTimestamp!) :
-						null
+					muteEndTime: action.muteAction?.muted
+						? toNumber(action.muteAction!.muteEndTimestamp!)
+						: null,
+					conditional: getChatUpdateConditional(id, undefined)
 				}
 			]
 		)
-	} else if(action?.archiveChatAction) {
+	} else if(action?.archiveChatAction || type === 'archive' || type === 'unarchive') {
 		// okay so we've to do some annoying computation here
 		// when we're initially syncing the app state
 		// there are a few cases we need to handle
@@ -637,35 +648,36 @@ export const processSyncAction = (
 		//		we compare the timestamp of latest message from the other person to determine this
 		// 2. if the account unarchiveChats setting is false -- then it doesn't matter,
 		//	it'll always take an app state action to mark in unarchived -- which we'll get anyway
-		const archiveAction = action.archiveChatAction
-		if(
-			isValidPatchBasedOnMessageRange(id, archiveAction.messageRange)
-			|| !isInitialSync
-			|| !accountSettings?.unarchiveChats
-		) {
-			// basically we don't need to fire an "archive" update if the chat is being marked unarchvied
-			// this only applies for the initial sync
-			if(isInitialSync && !archiveAction.archived) {
-				ev.emit('chats.update', [{ id, archive: false }])
-			} else {
-				ev.emit('chats.update', [{ id, archive: !!archiveAction?.archived }])
-			}
-		}
+		const archiveAction = action?.archiveChatAction
+		const isArchived = archiveAction
+			? archiveAction.archived
+		 	: type === 'archive'
+		// // basically we don't need to fire an "archive" update if the chat is being marked unarchvied
+		// // this only applies for the initial sync
+		// if(isInitialSync && !isArchived) {
+		// 	isArchived = false
+		// }
+
+		const msgRange = !accountSettings?.unarchiveChats ? undefined : archiveAction?.messageRange
+		// logger?.debug({ chat: id, syncAction }, 'message range archive')
+
+		ev.emit('chats.update', [{
+			id,
+			archived: isArchived,
+			conditional: getChatUpdateConditional(id, msgRange)
+		}])
 	} else if(action?.markChatAsReadAction) {
 		const markReadAction = action.markChatAsReadAction
-		if(
-			isValidPatchBasedOnMessageRange(id, markReadAction.messageRange)
-			|| !isInitialSync
-		) {
-			// basically we don't need to fire an "read" update if the chat is being marked as read
-			// because the chat is read by default
-			// this only applies for the initial sync
-			if(isInitialSync && markReadAction.read) {
-				ev.emit('chats.update', [{ id, unreadCount: null }])
-			} else {
-				ev.emit('chats.update', [{ id, unreadCount: !!markReadAction?.read ? 0 : -1 }])
-			}
-		}
+		// basically we don't need to fire an "read" update if the chat is being marked as read
+		// because the chat is read by default
+		// this only applies for the initial sync
+		const isNullUpdate = isInitialSync && markReadAction.read
+
+		ev.emit('chats.update', [{
+			id,
+			unreadCount: isNullUpdate ? null : !!markReadAction?.read ? 0 : -1,
+			conditional: getChatUpdateConditional(id, markReadAction?.messageRange)
+		}])
 	} else if(action?.deleteMessageForMeAction || type === 'deleteMessageForMe') {
 		ev.emit('messages.delete', { keys: [
 			{
@@ -677,11 +689,16 @@ export const processSyncAction = (
 	} else if(action?.contactAction) {
 		ev.emit('contacts.upsert', [{ id, name: action.contactAction!.fullName! }])
 	} else if(action?.pushNameSetting) {
-		if(me?.name !== action?.pushNameSetting) {
-			ev.emit('creds.update', { me: { ...me, name: action?.pushNameSetting?.name! } })
+		const name = action?.pushNameSetting?.name
+		if(name && me?.name !== name) {
+			ev.emit('creds.update', { me: { ...me, name } })
 		}
 	} else if(action?.pinAction) {
-		ev.emit('chats.update', [{ id, pin: action.pinAction?.pinned ? toNumber(action.timestamp!) : null }])
+		ev.emit('chats.update', [{
+			id,
+			pinned: action.pinAction?.pinned ? toNumber(action.timestamp!) : null,
+			conditional: getChatUpdateConditional(id, undefined)
+		}])
 	} else if(action?.unarchiveChatsSetting) {
 		const unarchiveChats = !!action.unarchiveChatsSetting.unarchiveChats
 		ev.emit('creds.update', { accountSettings: { unarchiveChats } })
@@ -703,23 +720,27 @@ export const processSyncAction = (
 			}
 		])
 	} else if(action?.deleteChatAction || type === 'deleteChat') {
-		if(
-			(
-				action?.deleteChatAction?.messageRange
-				&& isValidPatchBasedOnMessageRange(id, action?.deleteChatAction?.messageRange)
-			)
-			|| !isInitialSync
-		) {
+		if(!isInitialSync) {
 			ev.emit('chats.delete', [id])
 		}
 	} else {
-		logger?.warn({ syncAction, id }, 'unprocessable update')
+		logger?.debug({ syncAction, id }, 'unprocessable update')
 	}
 
-	function isValidPatchBasedOnMessageRange(id: string, msgRange: proto.SyncActionValue.ISyncActionMessageRange | null | undefined) {
-		const chat = recvChats?.[id]
+	function getChatUpdateConditional(id: string, msgRange: proto.SyncActionValue.ISyncActionMessageRange | null | undefined): ChatUpdate['conditional'] {
+		return isInitialSync
+			? (data) => {
+				const chat = data.historySets.chats[id] || data.chatUpserts[id]
+				if(chat) {
+					return msgRange ? isValidPatchBasedOnMessageRange(chat, msgRange) : true
+				}
+			}
+			: undefined
+	}
+
+	function isValidPatchBasedOnMessageRange(chat: Chat, msgRange: proto.SyncActionValue.ISyncActionMessageRange | null | undefined) {
 		const lastMsgTimestamp = msgRange?.lastMessageTimestamp || msgRange?.lastSystemMessageTimestamp || 0
-		const chatLastMsgTimestamp = chat?.lastMsgRecvTimestamp || 0
+		const chatLastMsgTimestamp = chat?.lastMessageRecvTimestamp || 0
 		return lastMsgTimestamp >= chatLastMsgTimestamp
 	}
 }

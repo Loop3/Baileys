@@ -27,10 +27,12 @@ export const makeSocket = ({
 	defaultQueryTimeoutMs,
 	syncFullHistory,
 	transactionOpts,
-	qrTimeout
+	qrTimeout,
+	options,
 }: SocketConfig) => {
 	const ws = new WebSocket(waWebSocketUrl, undefined, {
 		origin: DEFAULT_ORIGIN,
+		headers: options.headers,
 		handshakeTimeout: connectTimeoutMs,
 		timeout: connectTimeoutMs,
 		agent
@@ -423,7 +425,14 @@ export const makeSocket = ({
 	}
 
 	ws.on('message', onMessageRecieved)
-	ws.on('open', validateConnection)
+	ws.on('open', async() => {
+		try {
+			await validateConnection()
+		} catch(err) {
+			logger.error({ err }, 'error in validating connection')
+			end(err)
+		}
+	})
 	ws.on('error', error => end(
 		new Boom(
 			`WebSocket Error (${error.message})`,
@@ -533,7 +542,7 @@ export const makeSocket = ({
 		const name = update.me?.name
 		// if name has just been received
 		if(creds.me?.name !== name) {
-			logger.info({ name }, 'updated pushName')
+			logger.debug({ name }, 'updated pushName')
 			sendNode({
 				tag: 'presence',
 				attrs: { name: name! }
