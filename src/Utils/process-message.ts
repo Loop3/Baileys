@@ -2,8 +2,8 @@ import { AxiosRequestConfig } from 'axios'
 import type { Logger } from 'pino'
 import { proto } from '../../WAProto'
 import { AuthenticationCreds, BaileysEventEmitter, Chat, GroupMetadata, ParticipantAction, SignalKeyStoreWithTransaction, WAMessageStubType } from '../Types'
-import { downloadAndProcessHistorySyncNotification, normalizeMessageContent, toNumber } from '../Utils'
-import { areJidsSameUser, jidNormalizedUser } from '../WABinary'
+import { downloadAndProcessHistorySyncNotification, getContentType, normalizeMessageContent, toNumber } from '../Utils'
+import { areJidsSameUser, isJidBroadcast, isJidStatusBroadcast, jidNormalizedUser } from '../WABinary'
 
 type ProcessMessageContext = {
 	shouldProcessHistoryMsg: boolean
@@ -54,6 +54,7 @@ export const cleanMessage = (message: proto.IWebMessageInfo, meId: string) => {
 
 export const isRealMessage = (message: proto.IWebMessageInfo, meId: string) => {
 	const normalizedContent = normalizeMessageContent(message.message)
+	const hasSomeContent = !!getContentType(normalizedContent)
 	return (
 		!!normalizedContent
 		|| REAL_MSG_STUB_TYPES.has(message.messageStubType!)
@@ -62,6 +63,7 @@ export const isRealMessage = (message: proto.IWebMessageInfo, meId: string) => {
 			&& message.messageStubParameters?.some(p => areJidsSameUser(meId, p))
 		)
 	)
+	&& hasSomeContent
 	&& !normalizedContent?.protocolMessage
 	&& !normalizedContent?.reactionMessage
 }
@@ -69,6 +71,22 @@ export const isRealMessage = (message: proto.IWebMessageInfo, meId: string) => {
 export const shouldIncrementChatUnread = (message: proto.IWebMessageInfo) => (
 	!message.key.fromMe && !message.messageStubType
 )
+
+/**
+ * Get the ID of the chat from the given key.
+ * Typically -- that'll be the remoteJid, but for broadcasts, it'll be the participant
+ */
+export const getChatId = ({ remoteJid, participant, fromMe }: proto.IMessageKey) => {
+	if(
+		isJidBroadcast(remoteJid!)
+		&& !isJidStatusBroadcast(remoteJid!)
+		&& !fromMe
+	) {
+		return participant!
+	}
+
+	return remoteJid!
+}
 
 const processMessage = async(
 	message: proto.IWebMessageInfo,
@@ -84,7 +102,7 @@ const processMessage = async(
 	const meId = creds.me!.id
 	const { accountSettings } = creds
 
-	const chat: Partial<Chat> = { id: jidNormalizedUser(message.key.remoteJid!) }
+	const chat: Partial<Chat> = { id: jidNormalizedUser(getChatId(message.key)) }
 	const isRealMsg = isRealMessage(message, meId)
 
 	if(isRealMsg) {
@@ -123,19 +141,19 @@ const processMessage = async(
 			}, 'got history notification')
 
 			if(process) {
-				const data = await downloadAndProcessHistorySyncNotification(
-					histNotification,
-					options
-				)
-
-				ev.emit('messaging-history.set', { ...data, isLatest })
-
 				ev.emit('creds.update', {
 					processedHistoryMessages: [
 						...(creds.processedHistoryMessages || []),
 						{ key: message.key, messageTimestamp: message.messageTimestamp }
 					]
 				})
+
+				const data = await downloadAndProcessHistorySyncNotification(
+					histNotification,
+					options
+				)
+
+				ev.emit('messaging-history.set', { ...data, isLatest })
 			}
 
 			break
@@ -249,6 +267,10 @@ const processMessage = async(
 			const name = message.messageStubParameters?.[0]
 			chat.name = name
 			emitGroupUpdate({ subject: name })
+			break
+		case WAMessageStubType.GROUP_CHANGE_INVITE_LINK:
+			const code = message.messageStubParameters?.[0]
+			emitGroupUpdate({ inviteCode: code })
 			break
 		}
 	}
