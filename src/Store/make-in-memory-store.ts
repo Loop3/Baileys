@@ -48,12 +48,12 @@ export default (
 	}
 
 	const contactsUpsert = (newContacts: Contact[]) => {
-		const isGroup = newContacts[0]?.id.indexOf("@g.us") > -1;
+		const isGroup = newContacts[0]?.id.indexOf('@g.us') > -1
 
 		const oldContacts = new Set(
-			Object.keys(contacts).filter(c => c.indexOf("g.us") > -1 === isGroup)
-		);
-		
+			Object.keys(contacts).filter(c => c.indexOf('g.us') > -1 === isGroup)
+		)
+
 		for(const contact of newContacts) {
 			oldContacts.delete(contact.id)
 			contacts[contact.id] = Object.assign(
