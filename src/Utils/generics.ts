@@ -19,6 +19,7 @@ export const Browsers = {
 	ubuntu: browser => ['Ubuntu', browser, '20.0.04'] as [string, string, string],
 	macOS: browser => ['Mac OS', browser, '10.15.7'] as [string, string, string],
 	baileys: browser => ['Baileys', browser, '4.0.0'] as [string, string, string],
+	windows: browser => ['Windows', browser, '10.0.22621'] as [string, string, string],
 	/** The appropriate browser based on your OS & release */
 	appropriate: browser => [ PLATFORM_MAP[platform()] || 'Ubuntu', browser, release() ] as [string, string, string]
 }
@@ -40,6 +41,13 @@ export const BufferJSON = {
 		return value
 	}
 }
+
+export const getKeyAuthor = (
+	key: proto.IMessageKey | undefined | null,
+	meId: string = 'me'
+) => (
+	(key?.fromMe ? meId : key?.participant || key?.remoteJid) || ''
+)
 
 export const writeRandomPadMax16 = (msg: Uint8Array) => {
 	const pad = randomBytes(1)
@@ -136,7 +144,7 @@ export const delayCancellable = (ms: number) => {
 	return { delay, cancel }
 }
 
-export async function promiseTimeout<T>(ms: number | undefined, promise: (resolve: (v?: T)=>void, reject: (error) => void) => void) {
+export async function promiseTimeout<T>(ms: number | undefined, promise: (resolve: (v: T) => void, reject: (error) => void) => void) {
 	if(!ms) {
 		return new Promise(promise)
 	}
@@ -170,7 +178,7 @@ export function bindWaitForEvent<T extends keyof BaileysEventMap>(ev: BaileysEve
 		let listener: (item: BaileysEventMap[T]) => void
 		let closeListener: any
 		await (
-			promiseTimeout(
+			promiseTimeout<void>(
 				timeoutMs,
 				(resolve, reject) => {
 					closeListener = ({ connection, lastDisconnect }) => {
@@ -206,6 +214,7 @@ export const printQRIfNecessaryListener = (ev: BaileysEventEmitter, logger: Logg
 	ev.on('connection.update', async({ qr }) => {
 		if(qr) {
 			const QR = await import('qrcode-terminal')
+				.then(m => m.default || m)
 				.catch(() => {
 					logger.error('QR code terminal not added as dependency')
 				})
@@ -219,7 +228,7 @@ export const printQRIfNecessaryListener = (ev: BaileysEventEmitter, logger: Logg
  * Use to ensure your WA connection is always on the latest version
  */
 export const fetchLatestBaileysVersion = async(options: AxiosRequestConfig<any> = { }) => {
-	const URL = 'https://raw.githubusercontent.com/adiwajshing/Baileys/master/src/Defaults/baileys-version.json'
+	const URL = 'https://raw.githubusercontent.com/WhiskeySockets/Baileys/master/src/Defaults/baileys-version.json'
 	try {
 		const result = await axios.get<{ version: WAVersion }>(
 			URL,
@@ -348,13 +357,13 @@ const UNEXPECTED_SERVER_CODE_TEXT = 'Unexpected server response: '
 
 export const getCodeFromWSError = (error: Error) => {
 	let statusCode = 500
-	if(error.message.includes(UNEXPECTED_SERVER_CODE_TEXT)) {
-		const code = +error.message.slice(UNEXPECTED_SERVER_CODE_TEXT.length)
+	if(error?.message?.includes(UNEXPECTED_SERVER_CODE_TEXT)) {
+		const code = +error?.message.slice(UNEXPECTED_SERVER_CODE_TEXT.length)
 		if(!Number.isNaN(code) && code >= 400) {
 			statusCode = code
 		}
 	} else if(
-		(error as any).code?.startsWith('E')
+		(error as any)?.code?.startsWith('E')
 		|| error?.message?.includes('timed out')
 	) { // handle ETIMEOUT, ENOTFOUND etc
 		statusCode = 408
@@ -371,7 +380,7 @@ export const isWABusinessPlatform = (platform: string) => {
 	return platform === 'smbi' || platform === 'smba'
 }
 
-export function trimUndefineds(obj: any) {
+export function trimUndefined(obj: any) {
 	for(const key in obj) {
 		if(typeof obj[key] === 'undefined') {
 			delete obj[key]
@@ -379,4 +388,28 @@ export function trimUndefineds(obj: any) {
 	}
 
 	return obj
+}
+
+const CROCKFORD_CHARACTERS = '123456789ABCDEFGHJKLMNPQRSTVWXYZ'
+
+export function bytesToCrockford(buffer: Buffer): string {
+	let value = 0
+	let bitCount = 0
+	const crockford: string[] = []
+
+	for(let i = 0; i < buffer.length; i++) {
+		value = (value << 8) | (buffer[i] & 0xff)
+		bitCount += 8
+
+		while(bitCount >= 5) {
+			crockford.push(CROCKFORD_CHARACTERS.charAt((value >>> (bitCount - 5)) & 31))
+			bitCount -= 5
+		}
+	}
+
+	if(bitCount > 0) {
+		crockford.push(CROCKFORD_CHARACTERS.charAt((value << (5 - bitCount)) & 31))
+	}
+
+	return crockford.join('')
 }

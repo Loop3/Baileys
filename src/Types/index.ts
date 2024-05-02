@@ -8,6 +8,7 @@ export * from './Socket'
 export * from './Events'
 export * from './Product'
 export * from './Call'
+export * from './Signal'
 
 import { AuthenticationState } from './Auth'
 import { SocketConfig } from './Socket'
@@ -15,14 +16,16 @@ import { SocketConfig } from './Socket'
 export type UserFacingSocketConfig = Partial<SocketConfig> & { auth: AuthenticationState }
 
 export enum DisconnectReason {
-	connectionClosed = 428,
-	connectionLost = 408,
+    connectionClosed = 428,
+    connectionLost = 408,
     connectionReplaced = 440,
     timedOut = 408,
-	loggedOut = 401,
+    loggedOut = 401,
     badSession = 500,
     restartRequired = 515,
-    multideviceMismatch = 411
+    multideviceMismatch = 411,
+    forbidden = 403,
+    unavailableService = 503
 }
 
 export type WAInitResponse = {
@@ -52,4 +55,4 @@ export type WABusinessProfile = {
     address?: string
 }
 
-export type CurveKeyPair = { private: Uint8Array; public: Uint8Array }
+export type CurveKeyPair = { private: Uint8Array, public: Uint8Array }
