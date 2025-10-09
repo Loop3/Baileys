@@ -29359,7 +29359,7 @@ export const WEB_EVENTS: Event[] = [
     "wamChannel": "regular",
     "weight": 1
   }
-]
+] as any[]
 
 export const WEB_GLOBALS: Global[] = [
     {
