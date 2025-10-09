@@ -8213,17 +8213,21 @@ export namespace proto {
 
     interface IMessageKey {
         remoteJid?: (string|null);
+        remoteJidAlt?: (string|null);
         fromMe?: (boolean|null);
         id?: (string|null);
         participant?: (string|null);
+        participantAlt?: (string|null);
     }
 
     class MessageKey implements IMessageKey {
         constructor(p?: proto.IMessageKey);
         public remoteJid?: (string|null);
+        public remoteJidAlt?: (string|null);
         public fromMe?: (boolean|null);
         public id?: (string|null);
         public participant?: (string|null);
+        public participantAlt?: (string|null);
         public static create(properties?: proto.IMessageKey): proto.MessageKey;
         public static encode(m: proto.IMessageKey, w?: $protobuf.Writer): $protobuf.Writer;
         public static decode(r: ($protobuf.Reader|Uint8Array), l?: number): proto.MessageKey;
