@@ -16,6 +16,7 @@ import {
 	getBinaryNodeChildBuffer,
 	getBinaryNodeChildren,
 	getBinaryNodeChildUInt,
+	getServerFromDomainType,
 	jidDecode,
 	S_WHATSAPP_NET,
 	WAJIDDomains
@@ -86,6 +87,53 @@ export const xmppPreKey = (pair: KeyPair, id: number): BinaryNode => ({
 	]
 })
 
+const isValidUInt = (n: number | undefined): n is number => typeof n === 'number' && Number.isInteger(n)
+
+export const extractE2ESessionFromRetryReceipt = (receipt: BinaryNode) => {
+	const keysNode = getBinaryNodeChild(receipt, 'keys')
+	if (!keysNode) return null
+
+	const typeBuf = getBinaryNodeChildBuffer(keysNode, 'type')
+	if (!typeBuf || typeBuf.length !== 1 || typeBuf[0] !== KEY_BUNDLE_TYPE[0]) return null
+
+	const identity = getBinaryNodeChildBuffer(keysNode, 'identity')
+	const skey = getBinaryNodeChild(keysNode, 'skey')
+	if (!identity || identity.length !== 32 || !skey) return null
+
+	const registrationId = getBinaryNodeChildUInt(receipt, 'registration', 4)
+	if (!isValidUInt(registrationId)) return null
+
+	const signedPubKey = getBinaryNodeChildBuffer(skey, 'value')
+	const signedSig = getBinaryNodeChildBuffer(skey, 'signature')
+	const signedKeyId = getBinaryNodeChildUInt(skey, 'id', 3)
+	if (!signedPubKey || signedPubKey.length !== 32 || !signedSig || !isValidUInt(signedKeyId)) {
+		return null
+	}
+
+	const preKeyNode = getBinaryNodeChild(keysNode, 'key')
+	let preKey: { keyId: number; publicKey: Uint8Array } | undefined
+	if (preKeyNode) {
+		const preKeyPub = getBinaryNodeChildBuffer(preKeyNode, 'value')
+		const preKeyId = getBinaryNodeChildUInt(preKeyNode, 'id', 3)
+		if (!preKeyPub || preKeyPub.length !== 32 || !isValidUInt(preKeyId)) {
+			return null
+		}
+
+		preKey = { keyId: preKeyId, publicKey: generateSignalPubKey(preKeyPub) }
+	}
+
+	return {
+		registrationId,
+		identityKey: generateSignalPubKey(identity),
+		signedPreKey: {
+			keyId: signedKeyId,
+			publicKey: generateSignalPubKey(signedPubKey),
+			signature: signedSig
+		},
+		preKey
+	}
+}
+
 export const parseAndInjectE2ESessions = async (node: BinaryNode, repository: SignalRepositoryWithLIDStore) => {
 	const extractKey = (key: BinaryNode) =>
 		key
@@ -109,26 +157,24 @@ export const parseAndInjectE2ESessions = async (node: BinaryNode, repository: Si
 	const chunks = chunk(nodes, chunkSize)
 
 	for (const nodesChunk of chunks) {
-		await Promise.all(
-			nodesChunk.map(async (node: BinaryNode) => {
-				const signedKey = getBinaryNodeChild(node, 'skey')!
-				const key = getBinaryNodeChild(node, 'key')!
-				const identity = getBinaryNodeChildBuffer(node, 'identity')!
-				const jid = node.attrs.jid!
+		for (const node of nodesChunk) {
+			const signedKey = getBinaryNodeChild(node, 'skey')!
+			const key = getBinaryNodeChild(node, 'key')!
+			const identity = getBinaryNodeChildBuffer(node, 'identity')!
+			const jid = node.attrs.jid!
 
-				const registrationId = getBinaryNodeChildUInt(node, 'registration', 4)
+			const registrationId = getBinaryNodeChildUInt(node, 'registration', 4)
 
-				await repository.injectE2ESession({
-					jid,
-					session: {
-						registrationId: registrationId!,
-						identityKey: generateSignalPubKey(identity),
-						signedPreKey: extractKey(signedKey)!,
-						preKey: extractKey(key)!
-					}
-				})
+			await repository.injectE2ESession({
+				jid,
+				session: {
+					registrationId: registrationId!,
+					identityKey: generateSignalPubKey(identity),
+					signedPreKey: extractKey(signedKey)!,
+					preKey: extractKey(key)!
+				}
 			})
-		)
+		}
 	}
 }
 
@@ -144,26 +190,27 @@ export const extractDeviceJids = (
 
 	for (const userResult of result) {
 		const { devices, id } = userResult as { devices: ParsedDeviceInfo; id: string }
-		const { user, domainType, server } = jidDecode(id)!
+		const decoded = jidDecode(id)!,
+			{ user, server } = decoded
+		let { domainType } = decoded
 		const deviceList = devices?.deviceList as DeviceListData[]
-		if (Array.isArray(deviceList)) {
-			for (const { id: device, keyIndex, isHosted } of deviceList) {
-				if (
-					(!excludeZeroDevices || device !== 0) && // if zero devices are not-excluded, or device is non zero
-					((myUser !== user && myLid !== user) || myDevice !== device) && // either different user or if me user, not this device
-					(device === 0 || !!keyIndex) // ensure that "key-index" is specified for "non-zero" devices, produces a bad req otherwise
-				) {
-					extracted.push({
-						user,
-						device,
-						domainType: isHosted
-							? domainType === WAJIDDomains.LID
-								? WAJIDDomains.HOSTED_LID
-								: WAJIDDomains.HOSTED
-							: domainType,
-						server
-					})
+		if (!Array.isArray(deviceList)) continue
+		for (const { id: device, keyIndex, isHosted } of deviceList) {
+			if (
+				(!excludeZeroDevices || device !== 0) && // if zero devices are not-excluded, or device is non zero
+				((myUser !== user && myLid !== user) || myDevice !== device) && // either different user or if me user, not this device
+				(device === 0 || !!keyIndex) // ensure that "key-index" is specified for "non-zero" devices, produces a bad req otherwise
+			) {
+				if (isHosted) {
+					domainType = domainType === WAJIDDomains.LID ? WAJIDDomains.HOSTED_LID : WAJIDDomains.HOSTED
 				}
+
+				extracted.push({
+					user,
+					device,
+					domainType,
+					server: getServerFromDomainType(server, domainType)
+				})
 			}
 		}
 	}

@@ -5,10 +5,10 @@ import type { SignalRepositoryWithLIDStore } from '../Types/Signal'
 import {
 	areJidsSameUser,
 	type BinaryNode,
+	isHostedLidUser,
+	isHostedPnUser,
 	isJidBroadcast,
 	isJidGroup,
-	isJidHostedLidUser,
-	isJidHostedPnUser,
 	isJidMetaAI,
 	isJidNewsletter,
 	isJidStatusBroadcast,
@@ -19,8 +19,8 @@ import {
 import { unpadRandomMax16 } from './generics'
 import type { ILogger } from './logger'
 
-const getDecryptionJid = async (sender: string, repository: SignalRepositoryWithLIDStore): Promise<string> => {
-	if (sender.includes('@lid')) {
+export const getDecryptionJid = async (sender: string, repository: SignalRepositoryWithLIDStore): Promise<string> => {
+	if (isLidUser(sender) || isHostedLidUser(sender)) {
 		return sender
 	}
 
@@ -35,6 +35,7 @@ const storeMappingFromEnvelope = async (
 	decryptionJid: string,
 	logger: ILogger
 ): Promise<void> => {
+	// TODO: Handle hosted IDs
 	const { senderAlt } = extractAddressingContext(stanza)
 
 	if (senderAlt && isLidUser(senderAlt) && isPnUser(sender) && decryptionJid === sender) {
@@ -50,6 +51,7 @@ const storeMappingFromEnvelope = async (
 
 export const NO_MESSAGE_FOUND_ERROR_TEXT = 'Message absent from node'
 export const MISSING_KEYS_ERROR_TEXT = 'Key used already or never filled'
+export const ACCOUNT_RESTRICTED_TEXT = 'Your account has been restricted'
 
 // Retry configuration for failed decryption
 export const DECRYPTION_RETRY_CONFIG = {
@@ -58,7 +60,9 @@ export const DECRYPTION_RETRY_CONFIG = {
 	sessionRecordErrors: ['No session record', 'SessionError: No session record']
 }
 
+/** NACK reason codes we send to the server (client → server) */
 export const NACK_REASONS = {
+	SenderReachoutTimelocked: 463,
 	ParsingError: 487,
 	UnrecognizedStanza: 488,
 	UnrecognizedStanzaClass: 489,
@@ -73,6 +77,22 @@ export const NACK_REASONS = {
 	UnsupportedLIDGroup: 551,
 	DBOperationFailed: 552
 }
+
+/**
+ * Server-side error codes returned in ack stanzas (server → client) that we
+ * currently have dedicated handlers for. Extend as more handlers are added.
+ * Distinct from the client-side NackReason enum (WAWebCreateNackFromStanza).
+ */
+export const SERVER_ERROR_CODES = {
+	/**
+	 * 1:1 message missing privacy token (tctoken). Usually means the account is
+	 * restricted: WhatsApp blocks starting new chats but preserves existing ones,
+	 * since established chats already carry a tctoken.
+	 */
+	MessageAccountRestriction: '463',
+	/** Stanza validation failure (SMAX_INVALID) — likely stale device session */
+	SmaxInvalid: '479'
+} as const
 
 type MessageType =
 	| 'chat'
@@ -129,28 +149,36 @@ export function decodeMessageNode(stanza: BinaryNode, meId: string, meLid: strin
 	const participant: string | undefined = stanza.attrs.participant
 	const recipient: string | undefined = stanza.attrs.recipient
 
+	if (!msgId) {
+		throw new Boom('Invalid message stanza: missing id attribute', { data: stanza })
+	}
+
+	if (!from) {
+		throw new Boom('Invalid message stanza: missing from attribute', { data: stanza })
+	}
+
 	const addressingContext = extractAddressingContext(stanza)
 
 	const isMe = (jid: string) => areJidsSameUser(jid, meId)
 	const isMeLid = (jid: string) => areJidsSameUser(jid, meLid)
 
-	if (isPnUser(from) || isLidUser(from) || isJidHostedLidUser(from) || isJidHostedPnUser(from)) {
+	if (isPnUser(from) || isLidUser(from) || isHostedLidUser(from) || isHostedPnUser(from)) {
 		if (recipient && !isJidMetaAI(recipient)) {
-			if (!isMe(from!) && !isMeLid(from!)) {
+			if (!isMe(from) && !isMeLid(from)) {
 				throw new Boom('receipient present, but msg not from me', { data: stanza })
 			}
 
-			if (isMe(from!) || isMeLid(from!)) {
+			if (isMe(from) || isMeLid(from)) {
 				fromMe = true
 			}
 
 			chatId = recipient
 		} else {
-			chatId = from!
+			chatId = from
 		}
 
 		msgType = 'chat'
-		author = from!
+		author = from
 	} else if (isJidGroup(from)) {
 		if (!participant) {
 			throw new Boom('No participant in group message')
@@ -162,28 +190,28 @@ export function decodeMessageNode(stanza: BinaryNode, meId: string, meLid: strin
 
 		msgType = 'group'
 		author = participant
-		chatId = from!
+		chatId = from
 	} else if (isJidBroadcast(from)) {
 		if (!participant) {
 			throw new Boom('No participant in group message')
 		}
 
 		const isParticipantMe = isMe(participant)
-		if (isJidStatusBroadcast(from!)) {
+		if (isJidStatusBroadcast(from)) {
 			msgType = isParticipantMe ? 'direct_peer_status' : 'other_status'
 		} else {
 			msgType = isParticipantMe ? 'peer_broadcast' : 'other_broadcast'
 		}
 
 		fromMe = isParticipantMe
-		chatId = from!
+		chatId = from
 		author = participant
 	} else if (isJidNewsletter(from)) {
 		msgType = 'newsletter'
-		chatId = from!
-		author = from!
+		chatId = from
+		author = from
 
-		if (isMe(from!) || isMeLid(from!)) {
+		if (isMe(from) || isMeLid(from)) {
 			fromMe = true
 		}
 	} else {
@@ -195,16 +223,21 @@ export function decodeMessageNode(stanza: BinaryNode, meId: string, meLid: strin
 	const key: WAMessageKey = {
 		remoteJid: chatId,
 		remoteJidAlt: !isJidGroup(chatId) ? addressingContext.senderAlt : undefined,
+		remoteJidUsername: !isJidGroup(chatId)
+			? stanza.attrs.peer_recipient_username || stanza.attrs.recipient_username
+			: undefined,
 		fromMe,
 		id: msgId,
 		participant,
 		participantAlt: isJidGroup(chatId) ? addressingContext.senderAlt : undefined,
+		participantUsername: stanza.attrs.participant ? stanza.attrs.participant_username : undefined,
 		addressingMode: addressingContext.addressingMode,
 		...(msgType === 'newsletter' && stanza.attrs.server_id ? { server_id: stanza.attrs.server_id } : {})
 	}
 
 	const fullMessage: WAMessage = {
 		key,
+		category: stanza.attrs.category,
 		messageTimestamp: +stanza.attrs.t!,
 		pushName: pushname,
 		broadcast: isJidBroadcast(from)
@@ -247,6 +280,10 @@ export const decryptMessageNode = (
 						fullMessage.key.isViewOnce = true // TODO: remove from here and add a STUB TYPE
 					}
 
+					if (attrs.count && tag === 'enc') {
+						fullMessage.retryCount = Number(attrs.count)
+					}
+
 					if (tag !== 'enc' && tag !== 'plaintext') {
 						continue
 					}
@@ -259,12 +296,11 @@ export const decryptMessageNode = (
 
 					let msgBuffer: Uint8Array
 
-					const user = isPnUser(sender) ? sender : author // TODO: flaky logic
-
-					const decryptionJid = await getDecryptionJid(user, repository)
+					const decryptionJid = await getDecryptionJid(author, repository)
 
 					if (tag !== 'plaintext') {
-						await storeMappingFromEnvelope(stanza, user, repository, decryptionJid, logger)
+						// TODO: Handle hosted devices
+						await storeMappingFromEnvelope(stanza, author, repository, decryptionJid, logger)
 					}
 
 					try {
@@ -333,7 +369,7 @@ export const decryptMessageNode = (
 			}
 
 			// if nothing was found to decrypt
-			if (!decryptables) {
+			if (!decryptables && !fullMessage.key?.isViewOnce) {
 				fullMessage.messageStubType = proto.WebMessageInfo.StubType.CIPHERTEXT
 				fullMessage.messageStubParameters = [NO_MESSAGE_FOUND_ERROR_TEXT]
 			}

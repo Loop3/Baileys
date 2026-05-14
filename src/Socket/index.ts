@@ -9,12 +9,6 @@ const makeWASocket = (config: UserFacingSocketConfig) => {
 		...config
 	}
 
-	// If the user hasn't provided their own history sync function,
-	// let's create a default one that respects the syncFullHistory flag.
-	if (config.shouldSyncHistoryMessage === undefined) {
-		newConfig.shouldSyncHistoryMessage = () => !!newConfig.syncFullHistory
-	}
-
 	return makeCommunitiesSocket(newConfig)
 }
 
